@@ -150,9 +150,13 @@ bool BuildLegend(uint32_t id, Resource& out) {
   return true;
 }
 
+Provider sProvider = nullptr;
+
 bool Build(uint32_t id, const DiscReader& read, Resource& out) {
   if (id >= kTextBase)
     return BuildText(id, out);
+  if (id >= kProvidedBase && id < kProvidedEnd)
+    return sProvider != nullptr && sProvider(id, out);
   if (id >= kLegendDotTxtr && id <= kLegendMarkTxtr)
     return BuildLegend(id, out);
   // Each model's texture patches (material set 0 index -> texture).
@@ -385,6 +389,8 @@ bool SetAncsModel(std::vector<uint8_t>& ancs, uint32_t expectedModel, uint32_t m
   SetBE32(ancs, at, model);
   return true;
 }
+
+void SetProvider(Provider provider) { sProvider = provider; }
 
 const Resource* Find(uint32_t id, const DiscReader& read) {
   if (!IsCustomId(id))

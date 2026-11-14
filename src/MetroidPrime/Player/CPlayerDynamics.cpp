@@ -801,9 +801,19 @@ float CPlayer::ForwardInput(const CFinalInput& input, float turnInput) const {
   if (x2f8_morphBallState == kMS_Morphing && x584_ballTransitionAnim == 2) {
     forward = 0.f;
   }
+#ifdef TARGET_PC
+  // Standing up from a ball at rest (animation 5) holds Samus in place, but not after a Screw
+  // Attack: Echoes lets her walk forward through that unmorph (CPlayer.hpp), and the ball is
+  // always at rest by then.
+  if (x2f8_morphBallState == kMS_Unmorphing && x584_ballTransitionAnim == 5 &&
+      !PortScrewUnmorphTransition()) {
+    forward = 0.f;
+  }
+#else
   if (x2f8_morphBallState == kMS_Unmorphing && x584_ballTransitionAnim == 5) {
     forward = 0.f;
   }
+#endif
   if (!(forward < 0.001f)) {
     forward = CMath::Limit(forward / 0.8f, 1.f);
     if (CMath::AbsF(atan2f(CMath::AbsF(turnInput), forward)) <
@@ -890,6 +900,15 @@ static CVector3f sScrewLastJumpPosition = CVector3f(0.f, 0.f, 0.f);
 
 float CPlayer::JumpInput(const CFinalInput& input, CStateManager& mgr) {
   if (IsMorphBallTransitioning()) {
+#ifdef TARGET_PC
+    // Screw Attack: as in Echoes, a jump press during the morph that winds the attack up ends
+    // the morph at once and is the attack's first press.
+    if (x2f8_morphBallState == kMS_Morphing && CMorphBall::PortScrewMorphing() &&
+        ControlMapper::GetPressInput(ControlMapper::kC_JumpOrBoost, input)) {
+      x574_morphTime = x578_morphDuration;
+      CMorphBall::PortScrewForceJump();
+    }
+#endif
     return GetGravity() * GetMass();
   }
 #ifdef TARGET_PC
@@ -1897,6 +1916,9 @@ int CPlayer::GetNextBallTransitionAnim(float dt, bool& loop, CStateManager& mgr)
 }
 
 void CPlayer::TransitionToMorphBallState(float dt, CStateManager& mgr) {
+#ifdef TARGET_PC
+  PortSetScrewUnmorphTransition(false);
+#endif
   x584_ballTransitionAnim = ChoseTransitionToAnimation(dt, mgr);
   x58c_transitionVel = GetVelocityWR().Magnitude();
   if (HasAnimation()) {
@@ -2009,8 +2031,16 @@ void CPlayer::TransitionFromMorphBallState(float dt, CStateManager& mgr) {
         }
       }
     }
+#ifdef TARGET_PC
+    // After a Screw Attack Samus comes out facing the way her body was drawn, wherever the
+    // camera is (Echoes passes its `state == kMS_Morphed` here): bouncing off a wall can carry
+    // her past the camera, and the rule below would turn her to face away from it.
+    const bool keepDirection = PortScrewUnmorphTransition();
+#else
+    const bool keepDirection = false;
+#endif
     if (acosf(CMath::Limit(CVector3f::Dot(camToPlayer, direction), 1.f)) < M_PIF / 1.2f ||
-        x9c7_25_outOfBallLookAtHintActor) {
+        x9c7_25_outOfBallLookAtHintActor || keepDirection) {
       SetTransform(CTransform4f::LookAt(GetTranslation(), CVector3f(GetTranslation() + direction)));
     } else {
       SetTransform(
@@ -2040,6 +2070,18 @@ void CPlayer::TransitionFromMorphBallState(float dt, CStateManager& mgr) {
       }
     }
   }
+#ifdef TARGET_PC
+  // After a Screw Attack nothing above but a scripted look-at turns Samus from the way her body
+  // was drawn (CPlayer::UpdateMorphBallState set it as the leave direction): not the camera
+  // being unable to see her, nor an actor close to the camera.
+  if (PortScrewUnmorphTransition() && !x9c6_26_outOfBallLookAtHint &&
+      !x9c7_25_outOfBallLookAtHintActor) {
+    const CVector3f facing(x518_leaveMorphDir.GetX(), x518_leaveMorphDir.GetY(), 0.f);
+    if (facing.CanBeNormalized()) {
+      SetTransform(CTransform4f::LookAt(GetTranslation(), GetTranslation() + facing));
+    }
+  }
+#endif
   ForceGunOrientation(GetTransform(), mgr);
   DrawGun(mgr);
   mgr.CameraManager()->BallCamera()->SetState(CBallCamera::kBCS_FromBall, mgr);
@@ -2060,6 +2102,10 @@ void CPlayer::TransitionFromMorphBallState(float dt, CStateManager& mgr) {
       }
       sFastMorphAirCarry = true;
     }
+  } else if (PortScrewUnmorphTransition() && x258_movementState == NPlayer::kMS_FallingMorphed) {
+    // The Screw Attack's unmorph in the air (its recovery ended against a wall): Samus falls as
+    // the standing player does.
+    SetMoveState(NPlayer::kMS_ApplyJump, mgr);
   }
 #endif
   SetCameraState(kCS_Transitioning, mgr);
@@ -2113,8 +2159,10 @@ void CPlayer::EnterMorphBallState(CStateManager& mgr) {
 void CPlayer::LeaveMorphBallState(CStateManager& mgr) {
 #ifdef TARGET_PC
   // Only the end of a Fast Morph unmorph keeps velocity, not a scripted one.
-  const bool keepVelocity =
-      x2f8_morphBallState == kMS_Unmorphing && IsFastMorphTransition();
+  // Nor does the Screw Attack's unmorph stop Samus: she may be walking by its end, as in Echoes.
+  const bool keepVelocity = x2f8_morphBallState == kMS_Unmorphing &&
+                            (IsFastMorphTransition() || PortScrewUnmorphTransition());
+  PortSetScrewUnmorphTransition(false);
 #endif
   x730_transitionModels.clear();
   AddMaterial(kMT_GroundCollider, mgr);
@@ -2239,14 +2287,20 @@ void CPlayer::UpdateMorphBallTransition(float dt, CStateManager& mgr) {
   const bool fastMorph = IsFastMorphTransition();
   const CAdvancementDeltas deltas =
       UpdateAnimation(fastMorph ? dt / x578_morphDuration : dt, mgr, true);
-  if (!fastMorph) {
+  // The Screw Attack's unmorph shows Echoes' landing, not this stand-up animation, which still
+  // runs for its sound events: its root motion does not move Samus.
+  const bool screwUnmorph = PortScrewUnmorphTransition();
+  if (!fastMorph && !screwUnmorph) {
     MoveInOneFrameOR(deltas.GetOffsetDelta(), dt);
+  }
+  if (!screwUnmorph) {
+    RotateInOneFrameOR(deltas.GetOrientationDelta(), dt);
   }
 #else
   const CAdvancementDeltas deltas = UpdateAnimation(dt, mgr, true);
   MoveInOneFrameOR(deltas.GetOffsetDelta(), dt);
-#endif
   RotateInOneFrameOR(deltas.GetOrientationDelta(), dt);
+#endif
   x574_morphTime = rstl::min_val(x578_morphDuration, x574_morphTime + dt);
   const float morphT = x574_morphTime / x578_morphDuration;
   if ((!(morphT < .7f) || !(x574_morphTime > 2.f * dt)) && !x730_transitionModels.empty()) {
@@ -2257,6 +2311,14 @@ void CPlayer::UpdateMorphBallTransition(float dt, CStateManager& mgr) {
   }
   const CGameCamera& camera = mgr.GetCameraManager()->GetCurrentCamera(mgr);
   x588_alpha = GetTransitionAlpha(camera.GetTranslation(), camera.GetNearClipDistance());
+#ifdef TARGET_PC
+  // Screw Attack: Echoes' CPlayer::UpdateTransitionAlpha overrides the unmorph out of its
+  // recovery: whole for the first half, then fading linearly to nothing by the end, however far
+  // the camera is (Prime fades only as the camera nears her eye, so she stayed whole far longer).
+  if (screwUnmorph && morphState == kMS_Unmorphing) {
+    x588_alpha = morphT > .5f ? CMath::Clamp(0.f, 1.f - 2.f * (morphT - .5f), 1.f) : 1.f;
+  }
+#endif
   if (morphState == kMS_Morphing && morphT > .93f) {
     x588_alpha *= rstl::min_val(1.f - (morphT - .93f) / (1.f - .93f) + .2f, 1.f);
     SetModelFlags(CModelFlags::AlphaBlended(x588_alpha).DepthCompareUpdate(true, false));

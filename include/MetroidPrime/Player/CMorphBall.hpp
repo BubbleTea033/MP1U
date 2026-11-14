@@ -215,6 +215,9 @@ public:
   //   the ball is entered (CPlayer::EnterMorphBallState) -> a fast unmorph when it ends.
   static void PortScrewRequest(const CVector3f& direction, const CVector3f& lastJumpPosition);
   static void PortScrewReset();
+  // A jump press during the wind-up: it counts on the attack's first tick (Echoes'
+  // SetScrewAttackActive).
+  static void PortScrewForceJump();
   // The morph, or the unmorph, the screw attack is waiting for: CPlayer presses the button for it.
   static bool PortScrewWantsMorph();
   static bool PortScrewWantsUnmorph();
@@ -230,6 +233,19 @@ public:
   // the input engine keeps the Gameplay context (port_input_devices.cpp GameContexts) and the
   // jump binding keeps pressing jump, which a Morph Ball row for Boost would otherwise take.
   static bool PortScrewInProgress();
+  // The attack, or the recovery after it (Echoes' kBS_ScrewAttackRecovery): the ball is not the
+  // player's to steer or leave. The recovery is the lockout Echoes has after every attack: it
+  // lasts until Samus has been on the ground (or against anything) long enough, plus Echoes' time
+  // out of the ball.
+  static bool PortScrewLocked();
+  // After the attack and still in the ball: the recovery, and the wait for room to unmorph.
+  static bool PortScrewRecovering();
+  // From the wind-up's morph until Samus is out of the ball again: her body may stand in for the
+  // ball (port_screw_body.h).
+  static bool PortScrewBodyPhase();
+  // The way Samus faces through the attack and the recovery: the way she travels, or towards the
+  // wall she bounced off. False when there is none.
+  static bool PortScrewFacing(CVector3f& facing);
   // The height of the Space Jump the attack started from (Echoes' mLastSpaceJumpPosition), which
   // the ball camera holds itself above (CBallCamera::UpdateUsingColliders).
   static float PortScrewJumpHeight();
@@ -354,7 +370,11 @@ private:
   float x1c34_boostLightFactor;
   float x1c38_spiderLightFactor;
 #ifdef TARGET_PC
-  void PortEndScrewAttack();
+  // `reason` is a PortScrewBody::EEnd: it picks the exit animation.
+  void PortEndScrewAttack(int reason);
+  // Echoes' UpdateScrewAttackRecovery: no control, the ball slows on the ground, and the unmorph
+  // is asked for once the recovery has run its course.
+  void PortUpdateScrewRecovery(float dt);
   // A hit on the surface with this normal (pointing away from it) ends the attack as Echoes'
   // CollidedWith and UpdateScrewAttackRecovery do: a wall recoils the ball, a ceiling stops it.
   void PortScrewHit(const CVector3f& normal);

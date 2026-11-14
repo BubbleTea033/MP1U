@@ -1052,6 +1052,22 @@ void CBallCamera::UpdatePlayerMovement(float dt, CStateManager& mgr) {
     float speedFactor = fabsf(sinf(0.017453292f * (90.f * (tmpVel / (x2ec_maxBallVel - 4.f)))));
     x308_speedFactor = CMath::Limit(speedFactor, 1.f);
   }
+#ifdef TARGET_PC
+  // Screw Attack: Echoes' rule (its CBallCamera::UpdatePlayerMovement): the flat velocity over
+  // the ball's top speed on normal ground, clamped. Prime's sine of (speed - 4) / (max - 4) takes
+  // the maximum for the surface, 4.15 in the air, so the rebound's 8-12 units a second sent it
+  // round the sine many times over: the speed factor, and the distance it sets, jumped every
+  // tick and the camera popped in and out behind Samus.
+  if (CMorphBall::PortScrewInProgress()) {
+    const CVector3f& velocity = player->GetVelocityWR();
+    float velFlat = CMath::SqrtF(velocity.GetX() * velocity.GetX() + velocity.GetY() * velocity.GetY());
+    if (!x2fc_ballDeltaFlat.CanBeNormalized() || x2fc_ballDeltaFlat.Magnitude() < dt) {
+      velFlat = 0.f;
+    }
+    const float topSpeed = gpTweakBall->GetBallTranslationMaxSpeed(CPlayer::kSR_Normal);
+    x308_speedFactor = topSpeed > 0.f ? CMath::Clamp(0.f, velFlat / topSpeed, 1.f) : 0.f;
+  }
+#endif
 
   x190_curMinDistance =
       x308_speedFactor * (x198_maxDistance - x194_targetMinDistance) + x194_targetMinDistance;
@@ -1761,8 +1777,28 @@ void CBallCamera::UpdateUsingColliders(float dt, CStateManager& mgr) {
   }
 
 #ifdef TARGET_PC
+  // The height the attack held is let go gently. The rules above kept running under the hold,
+  // so on its last tick they are wherever the ball's jumps took them, often units away, and
+  // through the recovery's fall they move in uneven steps. Until Samus is out of the ball the
+  // camera eases towards their height, and its speed changes by at most 120 units a second each
+  // second.
+  static float sScrewReleaseStep = 0.f;
   if (screwAttack) {
+    sScrewReleaseStep = screwZ - oldPos.GetZ();
     finalPos[kDZ] = screwZ;
+  } else if (CMorphBall::PortScrewRecovering()) {
+    const float eased = (finalPos.GetZ() - oldPos.GetZ()) * (1.f - expf(-8.f * dt));
+    const float change = 120.f * dt * dt;
+    sScrewReleaseStep = CMath::Clamp(sScrewReleaseStep - change, eased, sScrewReleaseStep + change);
+    finalPos[kDZ] = oldPos.GetZ() + sScrewReleaseStep;
+    // Retail's too-close rule (above) still holds under the ease: with the ball within 2 units,
+    // the camera is at least 2 over it. Overriding it let the ball, knocked back towards the
+    // camera off a wall, sit under it while that rule reset the spring every tick it was close,
+    // so the camera popped in and out around the 2-unit line. The ease carries on from here.
+    if (oldBallToCamFlat.Magnitude() < 2.f && finalPos.GetZ() < 2.f + ballPos.GetZ()) {
+      finalPos[kDZ] = 2.f + ballPos.GetZ();
+      sScrewReleaseStep = finalPos.GetZ() - oldPos.GetZ();
+    }
   }
 #endif
   finalPos = ClampElevationToWater(finalPos, mgr);
@@ -1817,6 +1853,50 @@ void CBallCamera::UpdateUsingTransitions(float dt, CStateManager& mgr) {
 
   switch (x400_state) {
   case kBCS_ToBall: {
+#ifdef TARGET_PC
+    // Screw Attack (CMorphBall.hpp): through the morph that winds it up, Echoes' camera
+    // (UpdateTransitionToBallCamera without a dt) stays where the first-person view was, level,
+    // and only turns towards the look-at position, which UpdateLookAtPosition keeps 2 units
+    // below the camera. Samus flies on ahead of it; it does not pull back and follow her.
+    if (CMorphBall::PortScrewMorphing()) {
+      const CVector3f position = GetTranslation();
+      CVector3f toLook = x1d8_lookPos - position;
+      CVector3f forward = GetTransform().GetForward();
+      forward.SetZ(0.f);
+      // The camera starts at Samus's eye, so the look-at position starts almost straight below
+      // it: aiming there plunges the view and leaves its heading to noise. Until she is this
+      // far ahead the camera aims that far along the way she travels instead.
+      CVector3f travel;
+      if (CMorphBall::PortScrewFacing(travel)) {
+        const float kMinAhead = 8.f;
+        const CVector3f flat(toLook.GetX(), toLook.GetY(), 0.f);
+        if (flat.Magnitude() < kMinAhead) {
+          toLook = CVector3f(kMinAhead * travel.GetX(), kMinAhead * travel.GetY(), toLook.GetZ());
+        }
+        if (forward.Magnitude() < 0.1f) {
+          forward = travel;
+        }
+      }
+      if (toLook.CanBeNormalized() && forward.CanBeNormalized()) {
+        toLook.Normalize();
+        forward.Normalize();
+        const float absDot = CMath::AbsF(CMath::Limit(CVector3f::Dot(forward, toLook), 1.f));
+        if (absDot < 1.f - 0.00001f) {
+          const float turn = CMath::Limit(1.5f * player->GetMorphBallTransitionFactor(), 1.f);
+          const CQuaternion quat =
+              CQuaternion::LookAt(CUnitVector3f(forward), CUnitVector3f(toLook),
+                                  CRelAngle(turn * acosf(absDot)));
+          SetTransform(quat.BuildTransform4f() *
+                       CTransform4f::LookAt(CVector3f::Zero(), forward).GetRotation());
+        } else {
+          SetTransform(CTransform4f::LookAt(CVector3f::Zero(), toLook));
+        }
+      }
+      SetTranslation(position);
+      TeleportCamera(position, mgr);
+      break;
+    }
+#endif
     float distance = x194_targetMinDistance;
     float elevation = x1a0_elevation;
     ConstrainElevationAndDistance(elevation, distance, dt, mgr);
@@ -2140,6 +2220,28 @@ void CBallCamera::UpdateLookAtPosition(float dt, CStateManager& mgr) {
   }
 
   CVector3f ballPos = player->GetBallPosition();
+#ifdef TARGET_PC
+  // Screw Attack (CMorphBall.hpp): through the morph that winds it up Echoes looks ahead of the
+  // ball, 2 units below the camera's own height (its IsBallCameraTransitioning covers that
+  // morph), where a plain morph looks at the ball. Samus rises in the wind-up, so looking at her
+  // tilts the view up; Echoes' tilts slightly down.
+  if (CMorphBall::PortScrewMorphing() &&
+      player->GetMorphballTransitionState() == CPlayer::kMS_Morphing) {
+    // Ahead along the attack's own direction and by the whole offset: the speed factor and the
+    // ball's movement, which Echoes scales and turns it by, are not kept up through a morph
+    // here, and the offset flickered with them from tick to tick (the view's pitch with it).
+    CVector3f ahead = CVector3f::Zero();
+    CVector3f travel;
+    if (CMorphBall::PortScrewFacing(travel)) {
+      ahead = x1b4_lookAtOffset.GetY() * travel;
+    }
+    x1d8_lookPos = ballPos + ahead;
+    x1d8_lookPos.SetZ(GetTranslation().GetZ() - 2.f);
+    x1c0_lookPosAhead = x1d8_lookPos;
+    x1cc_fixedLookPos = x1d8_lookPos;
+    return;
+  }
+#endif
   if (player->IsMorphBallTransitioning()) {
     x1d8_lookPos = ballPos;
     x1d8_lookPos.SetZ(x1d8_lookPos.GetZ() + x1b4_lookAtOffset.GetZ());
@@ -2175,6 +2277,7 @@ void CBallCamera::UpdateLookAtPosition(float dt, CStateManager& mgr) {
   // Screw Attack (CMorphBall.hpp): Echoes' UpdateLookAtPosition looks 2 units below the camera's
   // own height through the attack (its IsBallCameraTransitioning), not at the ball's: with the
   // height held too (UpdateUsingColliders), the view keeps one pitch while the ball jumps in it.
+  // The morph that winds the attack up has the same rule above.
   if (player->GetMorphBall()->PortScrewAttackActive()) {
     lookAtOffset.SetZ(GetTranslation().GetZ() - 2.f);
     lookAhead.SetZ(lookAtOffset.GetZ());

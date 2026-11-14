@@ -118,6 +118,19 @@ bool CBallCamera::UpdateTransitionFromBallCamera(CStateManager& mgr) {
                            morphFactor;
   }
 #endif
+#ifdef TARGET_PC
+  // Screw Attack (CPlayer::PortScrewUnmorphTransition): Samus walks during this unmorph, so the
+  // eye the camera closes in on moves and bobs, and aiming at it from ever nearer leaves the
+  // heading to noise (a plain unmorph from rest holds her still). The look point slides from
+  // her eye to well ahead of it the way she faces, which is also where first person will look.
+  if (CPlayer::PortScrewUnmorphTransition()) {
+    CVector3f ahead = player.GetTransform().GetForward();
+    ahead.SetZ(0.f);
+    if (ahead.CanBeNormalized()) {
+      lookPos = eyePos + (10.f * morphFactor) * ahead.AsNormalized();
+    }
+  }
+#endif
   CVector3f splinePoint = GetFailsafeBezierPoint(x47c_failsafeState->x90_splinePoints, morphFactor);
   float zDelta = splinePoint.GetZ() - endPos.GetZ();
   zDelta *= CMath::Clamp(0.f, 1.f - 1.5f * morphFactor, 1.f);

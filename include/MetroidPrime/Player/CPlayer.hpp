@@ -427,8 +427,19 @@ public:
   // Fast Morph (PortDebug::FastMorph) gives a transition a duration under the
   // retail 1 s; such a transition hides Samus behind the ball's energy flash.
   bool IsFastMorphTransition() const {
-    return x578_morphDuration > 0.f && x578_morphDuration < 1.f;
+    return x578_morphDuration > 0.f && x578_morphDuration < 1.f && !PortScrewUnmorphTransition();
   }
+  // Screw Attack (CMorphBall.hpp): the unmorph that ends its recovery. As in Echoes it is a full
+  // transition of the tweak's time out of the ball, not a fast morph: the camera flies back to
+  // the visor while Samus stands up, and she can already walk forward (no turning, no jumping,
+  // as in any morph transition).
+  static bool PortScrewUnmorphTransition();
+  static void PortSetScrewUnmorphTransition(bool on);
+  // Echoes' ResolveUnmorphCollision: where Samus has no room to stand (beside a wall), she is
+  // moved the shortest way to where she has.
+  void PortResolveScrewUnmorph(CStateManager& mgr);
+  // Where the Screw Attack's stand-in body is drawn (its model origin and facing).
+  CTransform4f PortScrewBodyTransform() const;
   float GetMorphDuration() const { return x578_morphDuration; }
 #endif
   const CScriptWater* GetVisorRunoffEffect(const CStateManager& mgr) const;

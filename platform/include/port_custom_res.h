@@ -72,6 +72,11 @@ inline bool IsCustomId(uint32_t id) { return (id & 0xFFFF0000u) == 0xDEAF0000u; 
 // 0xDEAF0000 on a patched disc.
 constexpr uint32_t kTextBase = 0xDEAF8000;
 
+// Ids a port feature supplies at run time (the Echoes Screw Attack's effects,
+// port_screw_fx.h), answered by the provider set here; below kTextBase.
+constexpr uint32_t kProvidedBase = 0xDEAF4000;
+constexpr uint32_t kProvidedEnd = 0xDEAF5000;
+
 struct Resource {
   uint32_t type = 0; // FourCC
   std::vector<uint8_t> data; // uncompressed
@@ -84,6 +89,11 @@ using DiscReader = std::function<bool(uint32_t id, std::vector<uint8_t>& out)>;
 // when its disc source is missing or not the expected layout. Pointers stay
 // valid for the whole run.
 const Resource* Find(uint32_t id, const DiscReader& read);
+
+// The provider of kProvidedBase..kProvidedEnd: fills `out` for an id it has, false otherwise.
+// Set before the first load of one of those ids (a found resource is kept for the run).
+using Provider = bool (*)(uint32_t id, Resource& out);
+void SetProvider(Provider provider);
 
 // The SCAN id of a scan showing `text` (UTF-8, in the game's text markup),
 // made on first use of `key`; the same key always gets the same id (its STRG

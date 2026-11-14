@@ -383,6 +383,8 @@ set(MP_PORT_SOURCES
     platform/port_dread_samus.cpp
     platform/port_echoes_suits_import.cpp
     platform/port_screw_body.cpp
+    platform/port_screw_audio.cpp
+    platform/port_screw_fx.cpp
     platform/port_echoes_suits.cpp
     platform/port_dread_pkg.cpp
     platform/port_dread_bcmdl.cpp
@@ -1632,6 +1634,10 @@ if(MP_BUILD_TESTS)
     # The Screw Attack's animation from Echoes: ANIM decoding, retargeting, the baked file.
     mp_port_test(port_echoes_anim_tests
         SOURCES tests/port_echoes_anim.cpp
+        INCLUDES platform/include)
+    # The Screw Attack's sounds from Echoes: audio group conversion and the baked file.
+    mp_port_test(port_screw_audio_tests
+        SOURCES tests/port_screw_audio.cpp
         INCLUDES platform/include)
     # Every port_settings.ini key reads back as written (platform/debug_ui/settings.cpp,
     # kSettingKeys); the game binary checks itself and exits before starting.

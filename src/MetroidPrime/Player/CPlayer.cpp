@@ -10,6 +10,8 @@
 #include "port_freecam.h"
 #include "port_third_person.h"
 #include "port_third_person_body.h"
+#include "port_screw_audio.h"
+#include "port_screw_fx.h"
 #include "port_screw_body.h"
 
 #include "Collision/CInternalCollisionStructure.hpp"
@@ -1126,16 +1128,37 @@ void CPlayer::Update(float dt, CStateManager& mgr) {
   SetCoefficientOfRestitutionModifier(0.f);
   UpdateMorphBallTransition(dt, mgr);
 #ifdef TARGET_PC
-  // Screw Attack: Samus spins in place of the ball, with Echoes' clips when they were imported.
+  // Screw Attack: Samus stands in for the ball, posed by Echoes' clips when they were imported,
+  // from the morph that winds the attack up until the unmorph after it is over.
   {
-    const bool spin = x2f8_morphBallState == kMS_Morphed && x768_morphball->PortScrewAttackActive() &&
-                      PortScrewBody::Available();
-    if (spin && !PortScrewBody::Showing()) {
+    const bool inBall =
+        (x2f8_morphBallState == kMS_Morphing || x2f8_morphBallState == kMS_Morphed) &&
+        CMorphBall::PortScrewBodyPhase();
+    const bool standingUp = x2f8_morphBallState == kMS_Unmorphing && PortScrewUnmorphTransition();
+    const bool body = (inBall || standingUp) && PortScrewBody::Available();
+    if (body && !PortScrewBody::Showing()) {
       PortScrewBody::Begin(ModelData()->AnimationData());
-    } else if (!spin && PortScrewBody::Showing()) {
+    } else if (!body && PortScrewBody::Showing()) {
       PortScrewBody::End();
     }
+    if (standingUp) {
+      // The walk's speed is the body's: the model is drawn at its scale, so a clip unit is
+      // `scale` world units.
+      const CVector3f v = GetVelocityWR();
+      const float scale = GetModelData()->GetScale().GetX();
+      PortScrewBody::Walk(CMath::SqrtF(v.GetX() * v.GetX() + v.GetY() * v.GetY()) /
+                          (scale > 0.f ? scale : 1.f));
+    }
     PortScrewBody::Tick(dt);
+    // Echoes' effects: the spin's on the posed Skeleton_Root (its clip's events, which follow the
+    // bone's position and rotation), the jump flashes on the body; Echoes scales both by the
+    // model's scale.
+    const CTransform4f bodyXf = PortScrewBodyTransform();
+    const CTransform4f boneXf =
+        PortScrewBody::Showing()
+            ? bodyXf * GetModelData()->GetScaledLocatorTransform(rstl::string_l("Skeleton_Root"))
+            : bodyXf;
+    PortScrewFx::Update(dt, boneXf, bodyXf, GetModelData()->GetScale());
   }
 #endif
 
@@ -2644,6 +2667,47 @@ static const float kFastMorphDuration = .2f;
 static float MorphTransitionDuration() {
   return PortDebug::FastMorph() ? kFastMorphDuration : 1.f;
 }
+// Echoes' screwAttackIntoBallTransitionTime and screwAttackOutOfBallTransitionTime (its Ball
+// tweak): the morph that winds a Screw Attack up, and the unmorph after it.
+static const float kScrewIntoBallDuration = .75f;
+static const float kScrewOutOfBallDuration = .75f;
+static bool sPortScrewUnmorphTransition = false;
+bool CPlayer::PortScrewUnmorphTransition() { return sPortScrewUnmorphTransition; }
+
+CTransform4f CPlayer::PortScrewBodyTransform() const {
+  CTransform4f bodyXf = GetTransform();
+  CVector3f facing;
+  if (CMorphBall::PortScrewFacing(facing)) {
+    bodyXf = CTransform4f::LookAt(GetTranslation(), GetTranslation() + facing);
+  }
+  const CVector3f scale = GetModelData()->GetScale();
+  const CVector3f centre = PortScrewBody::Centre();
+  const CVector3f middle(centre.GetX() * scale.GetX(), centre.GetY() * scale.GetY(),
+                         centre.GetZ() * scale.GetZ());
+  const CVector3f toBall =
+      CVector3f(0.f, 0.f, x768_morphball->GetBallRadius()) - bodyXf.Rotate(middle);
+  bodyXf.SetTranslation(GetTranslation() + PortScrewBody::BallAnchor() * toBall);
+  return bodyXf;
+}
+void CPlayer::PortSetScrewUnmorphTransition(bool on) { sPortScrewUnmorphTransition = on; }
+
+void CPlayer::PortResolveScrewUnmorph(CStateManager& mgr) {
+  // The standing box where the ball is, and room to look for a free place around it.
+  const CAABox& base = GetBaseBoundingBox();
+  const CCollidableAABox box(base, GetCollisionPrimitive()->GetMaterial());
+  const CAABox world = base.GetTransformedAABox(GetPrimitiveTransform());
+  const CAABox reach(world.GetMinPoint() - CVector3f(6.f, 6.f, 6.f),
+                     world.GetMaxPoint() + CVector3f(6.f, 6.f, 6.f));
+  CAreaCollisionCache cache(reach);
+  CGameCollision::BuildAreaCollisionCache(mgr, cache);
+  TEntityList nearList;
+  mgr.BuildColliderList(nearList, *this, reach);
+  const rstl::optional_object< CVector3f > free =
+      CGameCollision::FindNonIntersectingVector(mgr, cache, *this, box, nearList);
+  if (free) {
+    SetTranslation(GetTranslation() + *free);
+  }
+}
 #else
 static float MorphTransitionDuration() { return 1.f; }
 #endif
@@ -2651,12 +2715,15 @@ static float MorphTransitionDuration() { return 1.f; }
 void CPlayer::UpdateMorphBallState(float dt, const CFinalInput& input, CStateManager& mgr) {
 #ifdef TARGET_PC
   // Screw Attack (CMorphBall.hpp) presses the button itself, as Echoes' pending screw attack
-  // transition does: into the ball when it starts and out when it ends, both as fast morphs
-  // whatever the Fast Morph setting. While it lasts the button does nothing.
+  // transition does: into the ball when it starts and out when its recovery ends, each over
+  // Echoes' own time whatever the Fast Morph setting. The morph in keeps the fast morph's rules
+  // (its duration is under a second: Samus keeps her velocity and falls freely); the unmorph is
+  // a full transition (PortScrewUnmorphTransition). While the attack lasts, and through the
+  // recovery after it, the button does nothing.
   const bool screwMorph = CMorphBall::PortScrewWantsMorph();
   const bool screwUnmorph = CMorphBall::PortScrewWantsUnmorph();
   const bool screw = screwMorph || screwUnmorph;
-  if (!screw && (x768_morphball->PortScrewAttackActive() ||
+  if (!screw && (CMorphBall::PortScrewLocked() ||
                  !ControlMapper::GetPressInput(ControlMapper::kC_Morph, input))) {
     return;
   }
@@ -2668,7 +2735,9 @@ void CPlayer::UpdateMorphBallState(float dt, const CFinalInput& input, CStateMan
     CMorphBall::PortScrewUnmorphHandled();
     return;
   }
-  const float morphDuration = screw ? kFastMorphDuration : MorphTransitionDuration();
+  const float morphDuration = screwMorph     ? kScrewIntoBallDuration
+                              : screwUnmorph ? kScrewOutOfBallDuration
+                                             : MorphTransitionDuration();
 #else
   if (!ControlMapper::GetPressInput(ControlMapper::kC_Morph, input)) {
     return;
@@ -2686,6 +2755,9 @@ void CPlayer::UpdateMorphBallState(float dt, const CFinalInput& input, CStateMan
 #ifdef TARGET_PC
       if (screwMorph) {
         CMorphBall::PortScrewMorphStarted(true);
+        // Echoes' wind-up clip starts this at its first frame.
+        PortScrewAudio::Play(PortScrewAudio::kScrewIn, GetTranslation());
+        PortScrewFx::Prepare();
       }
     } else if (screwMorph) {
       CMorphBall::PortScrewMorphStarted(false);
@@ -2698,19 +2770,40 @@ void CPlayer::UpdateMorphBallState(float dt, const CFinalInput& input, CStateMan
     break;
   case kMS_Morphed: {
     CVector3f posDelta = CVector3f::Zero();
+#ifdef TARGET_PC
+    bool canLeave = CanLeaveMorphBallState(mgr, posDelta);
+    if (!canLeave && screwUnmorph) {
+      // No room to stand (beside a wall): Echoes moves Samus to where there is.
+      PortResolveScrewUnmorph(mgr);
+      posDelta = CVector3f::Zero();
+      canLeave = CanLeaveMorphBallState(mgr, posDelta);
+    }
+    if (canLeave) {
+#else
     if (CanLeaveMorphBallState(mgr, posDelta)) {
+#endif
       SetTranslation(GetTranslation() + posDelta);
       x574_morphTime = 0.f;
       x578_morphDuration = morphDuration;
+#ifdef TARGET_PC
+      if (screwUnmorph) {
+        // Samus comes out facing the way the attack left her, as her body is drawn.
+        CVector3f facing;
+        if (CMorphBall::PortScrewFacing(facing)) {
+          x518_leaveMorphDir = facing;
+          x500_lookDir = facing;
+        }
+        PortSetScrewUnmorphTransition(true);
+      }
+#endif
       TransitionFromMorphBallState(dt, mgr);
 #ifdef TARGET_PC
       if (screwUnmorph) {
         CMorphBall::PortScrewUnmorphHandled();
       }
     } else if (screwUnmorph) {
-      // No room to stand yet (beside a wall, under a ceiling): try again next tick while the ball
-      // is in the air. On the ground, or after a while, it ends as a ball.
-      if (x258_movementState == NPlayer::kMS_OnGround || !CMorphBall::PortScrewRetryUnmorph()) {
+      // Still no room (a tunnel): tried again each tick for a while, then it ends as a ball.
+      if (!CMorphBall::PortScrewRetryUnmorph()) {
         CMorphBall::PortScrewUnmorphHandled();
       }
 #endif
@@ -2989,6 +3082,21 @@ void CPlayer::Render(const CStateManager& mgr) const {
   if (!firstPerson && doRender) {
     bool doTransitionRender = false;
     bool doBallRender = false;
+#ifdef TARGET_PC
+    // Screw Attack: Samus's own model and arm cannon in place of the ball (port_screw_body.h),
+    // facing the way the attack travels. The spin turns about the ball's centre; the fall and the
+    // landing stand on the player's position, which in the ball is the ground under it.
+    const auto renderScrewBody = [&](const CModelFlags& flags) {
+      const CTransform4f bodyXf = PortScrewBodyTransform();
+      GetModelData()->Render(mgr, bodyXf, GetActorLights(), flags);
+      if (HasTransitionBeamModel()) {
+        x7f0_ballTransitionBeamModel->Touch(mgr, 0);
+        x7f0_ballTransitionBeamModel->Render(
+            mgr, bodyXf * GetModelData()->GetScaledLocatorTransform(rstl::string_l(kGunLocator)),
+            GetActorLights(), flags);
+      }
+    };
+#endif
     switch (x2f8_morphBallState) {
     case kMS_Unmorphed:
 #ifdef TARGET_PC
@@ -3014,33 +3122,36 @@ void CPlayer::Render(const CStateManager& mgr) const {
       break;
     case kMS_Morphing:
       x768_morphball->TouchModel(mgr);
+#ifdef TARGET_PC
+      // Screw Attack: the wind-up is Samus curling up, not the ball forming in its flash.
+      if (PortScrewBody::Showing()) {
+        GetModelData()->Touch(mgr, 0);
+        renderScrewBody(CModelFlags::Normal());
+        break;
+      }
+#endif
       doTransitionRender = true;
       doBallRender = true;
       break;
     case kMS_Unmorphing:
       x490_gun->TouchModel(mgr);
+#ifdef TARGET_PC
+      // Screw Attack: Samus finishes her landing as the camera flies back to her visor, fading
+      // as it nears her (the transition's alpha), with no ball and no flash.
+      if (PortScrewBody::Showing()) {
+        GetModelData()->Touch(mgr, 0);
+        renderScrewBody(GetModelFlags());
+        break;
+      }
+#endif
       doTransitionRender = true;
       doBallRender = true;
       break;
     case kMS_Morphed:
       GetModelData()->Touch(mgr, 0);
 #ifdef TARGET_PC
-      // Screw Attack: the spinning body, its middle on the ball's centre, and its arm cannon.
       if (PortScrewBody::Showing()) {
-        CTransform4f bodyXf = GetTransform();
-        const CVector3f scale = GetModelData()->GetScale();
-        const CVector3f centre = PortScrewBody::Centre();
-        const CVector3f middle(centre.GetX() * scale.GetX(), centre.GetY() * scale.GetY(),
-                               centre.GetZ() * scale.GetZ());
-        bodyXf.SetTranslation(GetTranslation() + CVector3f(0.f, 0.f, x768_morphball->GetBallRadius()) -
-                              bodyXf.Rotate(middle));
-        GetModelData()->Render(mgr, bodyXf, GetActorLights(), CModelFlags::Normal());
-        if (HasTransitionBeamModel()) {
-          x7f0_ballTransitionBeamModel->Touch(mgr, 0);
-          x7f0_ballTransitionBeamModel->Render(
-              mgr, bodyXf * GetModelData()->GetScaledLocatorTransform(rstl::string_l(kGunLocator)),
-              GetActorLights(), CModelFlags::Normal());
-        }
+        renderScrewBody(CModelFlags::Normal());
         break;
       }
 #endif
@@ -3049,6 +3160,7 @@ void CPlayer::Render(const CStateManager& mgr) const {
     }
 
 #ifdef TARGET_PC
+    PortScrewFx::Render();
     // A fast morph shows only the ball forming in its flash, with the ball
     // effects retail plays over the second half spread over the whole of it.
     const bool fastMorph = doTransitionRender && IsFastMorphTransition();

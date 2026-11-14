@@ -57,6 +57,9 @@
 
 #include "rstl/math.hpp"
 #ifdef TARGET_PC
+#include "port_screw_audio.h"
+#include "port_screw_fx.h"
+#include "port_screw_body.h"
 #include "port_screw_diag.h"
 #endif
 
@@ -84,13 +87,30 @@ const float kScrewRecoilAway = 12.f;
 const float kScrewRecoilUp = 24.f;
 // How long an unmorph with no room is tried again before the ball is left as it is.
 const float kScrewUnmorphRetryTime = 1.5f;
+// Echoes' recovery (UpdateScrewAttackRecovery) ends, and Samus unmorphs over Echoes' time out of
+// the ball (CPlayer::UpdateMorphBallState), on the first of three things. Its landing animation
+// says so: a user event 0.25 s into the jump landing (1.067 s into the heavy one, played when
+// she fell faster than 50 units a second just before). Or the body state machine is back at
+// Locomotion: when the attack itself met the floor that is the end of the 0.3 s moving unmorph
+// it plays. Or the ball has been in contact for 0.4 s, a floor counting at half rate. The times
+// are those of the clips on Echoes' USA disc, compiled in so the lockout is the same without
+// them.
+const float kScrewRecoveryContactTime = 0.4f;
+const float kScrewLandEventTime = 0.25f;
+const float kScrewHardLandEventTime = 1.067f;
+const float kScrewFloorExitTime = 0.3f;
+const float kScrewHardLandSpeed = 50.f;
+const int kScrewHardLandFrames = 5;
+// A recovery that never touches anything (a bottomless fall) still ends.
+const float kScrewRecoveryMaxTime = 10.f;
 
 enum EScrewPhase {
   kScrewNone,
   kScrewWantsMorph, // requested in the air; CPlayer starts a fast morph
   kScrewMorphing,   // the morph is under way
   kScrewActive,     // in the ball
-  kScrewWantsUnmorph, // ended: no control until Samus unmorphs (Echoes' kBS_ScrewAttackRecovery)
+  kScrewRecovery,   // ended: no control while Samus falls and lands (Echoes' kBS_ScrewAttackRecovery)
+  kScrewWantsUnmorph, // recovered: CPlayer unmorphs, trying again while there is no room
 };
 EScrewPhase sScrewPhase = kScrewNone;
 CVector3f sScrewDirection = CVector3f(0.f, 1.f, 0.f);
@@ -101,16 +121,37 @@ int sScrewJumpCount = 0;
 // face against it, away from the surface.
 CVector3f sScrewPrevVelocity = CVector3f(0.f, 0.f, 0.f);
 float sScrewRecoverTime = 0.f;
+// The recovery: the way Samus faces, the contact since the last tick (CollidedWith) and in all,
+// and the ticks on the ground.
+CVector3f sScrewFacing = CVector3f(0.f, 1.f, 0.f);
+bool sScrewRecoveryContact = false;
+bool sScrewRecoveryFloorContact = false;
+float sScrewRecoveryContactTime = 0.f;
+int sScrewGroundedFrames = 0;
+// Whether the attack ended on the floor, the ticks left in which a fast fall still makes the
+// landing a heavy one, and the time left until the landing lets go (negative before it).
+bool sScrewEndedOnFloor = false;
+int sScrewHardLandFrames = 0;
+float sScrewLandTimeLeft = -1.f;
+// A jump press taken during the wind-up (CPlayer::JumpInput), for the attack's first tick.
+bool sScrewForcedJump = false;
 } // namespace
 
 void CMorphBall::PortScrewRequest(const CVector3f& direction, const CVector3f& lastJumpPosition) {
   sScrewPhase = kScrewWantsMorph;
   sScrewDirection = direction;
+  sScrewFacing = direction;
+  sScrewForcedJump = false;
   sScrewLastJumpPosition = lastJumpPosition;
   sScrewJumpCount = 0;
 }
 
-void CMorphBall::PortScrewReset() { sScrewPhase = kScrewNone; }
+void CMorphBall::PortScrewReset() {
+  sScrewPhase = kScrewNone;
+  PortScrewAudio::StopLoop();
+  PortScrewFx::StopSpin();
+}
+void CMorphBall::PortScrewForceJump() { sScrewForcedJump = true; }
 bool CMorphBall::PortScrewWantsMorph() { return sScrewPhase == kScrewWantsMorph; }
 bool CMorphBall::PortScrewWantsUnmorph() { return sScrewPhase == kScrewWantsUnmorph; }
 void CMorphBall::PortScrewMorphStarted(bool started) {
@@ -120,9 +161,24 @@ void CMorphBall::PortScrewUnmorphHandled() { sScrewPhase = kScrewNone; }
 bool CMorphBall::PortScrewRetryUnmorph() { return sScrewRecoverTime < kScrewUnmorphRetryTime; }
 bool CMorphBall::PortScrewMorphing() { return sScrewPhase == kScrewMorphing; }
 float CMorphBall::PortScrewJumpHeight() { return sScrewLastJumpPosition.GetZ(); }
-bool CMorphBall::PortScrewInProgress() {
-  return sScrewPhase == kScrewWantsMorph || sScrewPhase == kScrewMorphing ||
-         sScrewPhase == kScrewActive;
+bool CMorphBall::PortScrewInProgress() { return sScrewPhase != kScrewNone; }
+bool CMorphBall::PortScrewLocked() {
+  return sScrewPhase == kScrewActive || sScrewPhase == kScrewRecovery;
+}
+bool CMorphBall::PortScrewRecovering() {
+  return sScrewPhase == kScrewRecovery || sScrewPhase == kScrewWantsUnmorph;
+}
+bool CMorphBall::PortScrewBodyPhase() {
+  return sScrewPhase == kScrewMorphing || sScrewPhase == kScrewActive ||
+         sScrewPhase == kScrewRecovery || sScrewPhase == kScrewWantsUnmorph;
+}
+bool CMorphBall::PortScrewFacing(CVector3f& facing) {
+  CVector3f flat(sScrewFacing.GetX(), sScrewFacing.GetY(), 0.f);
+  if (sScrewPhase == kScrewNone || !flat.CanBeNormalized()) {
+    return false;
+  }
+  facing = flat.AsNormalized();
+  return true;
 }
 bool CMorphBall::PortScrewAttackActive() const { return sScrewPhase == kScrewActive; }
 
@@ -134,17 +190,77 @@ void CMorphBall::PortBeginScrewAttack() {
   LeaveBoosting();
   x1c_controlForce = CVector3f::Zero();
   x10_boostControlForce = CVector3f::Zero();
+  // Echoes' CMorphBall: this loop from entering the ball, the other from each jump.
+  PortScrewAudio::StartLoop(PortScrewAudio::kLoopEnter, x0_player.GetTranslation());
+  // The spin clip's three effects (its events at frame 0).
+  PortScrewFx::StartSpin();
 }
 
-// Echoes goes to kBS_ScrewAttackRecovery, plays Samus out of the spin and then unmorphs; without
-// her animations the ball unmorphs at once (CPlayer::UpdateMorphBallState; it stays a ball where
-// she cannot stand).
-void CMorphBall::PortEndScrewAttack() {
+// Echoes goes to kBS_ScrewAttackRecovery: Samus comes out of the spin, falls and lands with no
+// control, and only then unmorphs (PortUpdateScrewRecovery).
+void CMorphBall::PortEndScrewAttack(int reason) {
   if (sScrewPhase == kScrewActive) {
+    sScrewPhase = kScrewRecovery;
+    sScrewRecoverTime = 0.f;
+    sScrewRecoveryContact = false;
+    sScrewRecoveryFloorContact = false;
+    sScrewRecoveryContactTime = 0.f;
+    sScrewGroundedFrames = 0;
+    sScrewEndedOnFloor = reason == PortScrewBody::kEndFloor;
+    sScrewHardLandFrames = 0;
+    sScrewLandTimeLeft = -1.f;
+    PortScrewBody::EndAttack(static_cast< PortScrewBody::EEnd >(reason));
+    const CVector3f& at = x0_player.GetTranslation();
+    // The loop stops; the clip Samus comes out on carries its own sounds in Echoes.
+    PortScrewAudio::StopLoop();
+    PortScrewFx::StopSpin();
+    if (reason == PortScrewBody::kEndOut) {
+      PortScrewAudio::Play(PortScrewAudio::kScrewOut, at);
+    } else if (reason == PortScrewBody::kEndWallBump) {
+      PortScrewAudio::Play(PortScrewAudio::kScrewOutWall, at);
+      PortScrewAudio::Play(PortScrewAudio::kScrewJump, at);
+    }
+    PortScrewDiag::End(at.GetX(), at.GetY(), at.GetZ());
+  }
+}
+
+void CMorphBall::PortUpdateScrewRecovery(float dt) {
+  sScrewRecoverTime += dt;
+  if (sScrewRecoveryContact) {
+    sScrewRecoveryContactTime += sScrewRecoveryFloorContact ? 0.5f * dt : dt;
+    sScrewRecoveryContact = false;
+    sScrewRecoveryFloorContact = false;
+  }
+  if (x0_player.GetPlayerMovementState() == NPlayer::kMS_OnGround) {
+    // Echoes takes 5% of the ground speed off each tick (of 60 a second).
+    ++sScrewGroundedFrames;
+    const CVector3f velocity = x0_player.GetVelocityWR();
+    const float keep = powf(0.95f, 60.f * dt);
+    x0_player.SetVelocityWR(
+        CVector3f(velocity.GetX() * keep, velocity.GetY() * keep, velocity.GetZ()));
+    if (sScrewGroundedFrames > 1 && sScrewLandTimeLeft < 0.f) {
+      if (sScrewEndedOnFloor) {
+        sScrewLandTimeLeft = kScrewFloorExitTime;
+      } else {
+        const bool hard = sScrewHardLandFrames > 0;
+        sScrewLandTimeLeft = hard ? kScrewHardLandEventTime : kScrewLandEventTime;
+        PortScrewBody::Landed(hard);
+      }
+    }
+  } else if (x0_player.GetVelocityWR().GetZ() < -kScrewHardLandSpeed) {
+    sScrewHardLandFrames = kScrewHardLandFrames;
+  } else if (sScrewHardLandFrames > 0) {
+    --sScrewHardLandFrames;
+  }
+  bool landed = false;
+  if (sScrewLandTimeLeft >= 0.f) {
+    sScrewLandTimeLeft -= dt;
+    landed = sScrewLandTimeLeft <= 0.f;
+  }
+  if (landed || sScrewRecoveryContactTime > kScrewRecoveryContactTime ||
+      sScrewRecoverTime > kScrewRecoveryMaxTime) {
     sScrewPhase = kScrewWantsUnmorph;
     sScrewRecoverTime = 0.f;
-    const CVector3f& at = x0_player.GetTranslation();
-    PortScrewDiag::End(at.GetX(), at.GetY(), at.GetZ());
   }
 }
 
@@ -153,19 +269,25 @@ void CMorphBall::PortScrewHit(const CVector3f& normal) {
     return;
   }
   CVector3f velocity = x0_player.GetVelocityWR();
+  int reason = PortScrewBody::kEndFloor;
   if (normal.GetZ() < -0.7f) {
     // A ceiling: the climb stops there.
     velocity.SetZ(rstl::min_val(velocity.GetZ(), 0.f));
     x0_player.SetVelocityWR(velocity);
+    reason = PortScrewBody::kEndOut;
   } else if (normal.GetZ() <= 0.7f) {
-    // A wall: Echoes recoils the ball away from it and up.
+    // A wall: Echoes recoils the ball away from it and up, Samus still facing the wall.
+    reason = PortScrewBody::kEndOut;
     CVector3f away(normal.GetX(), normal.GetY(), 0.f);
     if (away.CanBeNormalized()) {
       away.Normalize();
       x0_player.SetVelocityWR(kScrewRecoilAway * away + CVector3f(0.f, 0.f, kScrewRecoilUp));
+      sScrewFacing = -away;
+      reason = PortScrewBody::kEndWallBump;
+      PortScrewAudio::Play(PortScrewAudio::kWallHit, x0_player.GetTranslation());
     }
   }
-  PortEndScrewAttack();
+  PortEndScrewAttack(reason);
 }
 
 // Echoes' CMorphBall::ApplyScrewAttackDamage: the tweak's damage, a second's worth over 60 ticks,
@@ -218,7 +340,10 @@ void CMorphBall::PortComputeScrewAttack(const CFinalInput& input, CStateManager&
     end = true;
   }
 
-  if (ControlMapper::GetPressInput(ControlMapper::kC_JumpOrBoost, input) && !end &&
+  const bool jumpPressed =
+      ControlMapper::GetPressInput(ControlMapper::kC_JumpOrBoost, input) || sScrewForcedJump;
+  sScrewForcedJump = false;
+  if (jumpPressed && !end &&
       sScrewJumpCount < kScrewMaxJumps) {
     if (CMath::AbsF(drop) < dropLimit && x0_player.GetVelocityWR().GetZ() < 0.f) {
       // Echoes: jump energy plus the potential energy lost since the last Space Jump.
@@ -229,21 +354,25 @@ void CMorphBall::PortComputeScrewAttack(const CFinalInput& input, CStateManager&
       if (CMath::AbsF(steering) > 0.05f) {
         sScrewDirection = CTransform4f::RotateZ(CRelAngle(kScrewMaxSteeringAngle * steering))
                               .Rotate(sScrewDirection);
+        sScrewFacing = sScrewDirection;
       }
       x0_player.SetVelocityWR(kScrewHorizontalJumpVelocity * sScrewDirection +
                               CVector3f(0.f, 0.f, jumpSpeed));
       ++sScrewJumpCount;
       const CVector3f& at = x0_player.GetTranslation();
       PortScrewDiag::Jump(at.GetX(), at.GetY(), at.GetZ());
+      PortScrewAudio::StartLoop(PortScrewAudio::kLoop, at);
+      PortScrewFx::JumpFlash();
     } else {
       end = true;
     }
   }
 
   if (end) {
-    PortEndScrewAttack();
+    PortEndScrewAttack(PortScrewBody::kEndOut);
   } else {
     PortApplyScrewAttackDamage(mgr, dt);
+    PortScrewAudio::UpdateLoop(x0_player.GetTranslation());
   }
   sScrewPrevVelocity = x0_player.GetVelocityWR();
 }
@@ -701,6 +830,10 @@ void CMorphBall::ComputeBallMovement(const CFinalInput& input, CStateManager& mg
   // Boost Ball's alone.
   if (sSpringBallCooldown > 0.f) {
     sSpringBallCooldown -= dt;
+  } else if (sScrewPhase != kScrewNone) {
+    // Screw Attack: no Spring Ball from the wind-up to the unmorph after the recovery (Echoes'
+    // lockout), and no flick left over to fire when control returns.
+    PortDebug::ClearSpringBallFlick();
   } else if ((input.ARAUp() > 0.f ||
               (input.Time() > 0.f && (PortDebug::TwinStickRightY() > 0.25f ||
                                       PortDebug::SpringBallFlickPending() ||
@@ -726,7 +859,12 @@ void CMorphBall::ComputeBallMovement(const CFinalInput& input, CStateManager& mg
     PortComputeScrewAttack(input, mgr, dt);
     return;
   }
-  // Ended and waiting for room to unmorph: no control, as in Echoes' recovery.
+  PortScrewAudio::StopLoop();
+  // Ended: no control through Echoes' recovery, nor while waiting for room to unmorph after it.
+  if (sScrewPhase == kScrewRecovery) {
+    PortUpdateScrewRecovery(dt);
+    return;
+  }
   if (sScrewPhase == kScrewWantsUnmorph) {
     sScrewRecoverTime += dt;
     return;
@@ -1694,7 +1832,8 @@ void CMorphBall::EnterMorphBallState(CStateManager& mgr) {
 void CMorphBall::LeaveMorphBallState(CStateManager&) {
 #ifdef TARGET_PC
   // However the ball is left, a screw attack does not outlive it.
-  if (sScrewPhase == kScrewActive || sScrewPhase == kScrewWantsUnmorph) {
+  if (sScrewPhase == kScrewActive || sScrewPhase == kScrewRecovery ||
+      sScrewPhase == kScrewWantsUnmorph) {
     sScrewPhase = kScrewNone;
   }
   sSpringBallCooldown = 0.f;
@@ -2711,6 +2850,13 @@ void CMorphBall::CollidedWith(const TUniqueId& id, const CCollisionInfoList& lis
       normal = -normal; // away from the surface, against the way the ball came
     }
     PortScrewHit(normal);
+  }
+  // Echoes' recovery counts its contacts (the one that ended the attack too), floors at half rate.
+  if (sScrewPhase == kScrewRecovery && list.GetCount() > 0) {
+    sScrewRecoveryContact = true;
+    if (CMath::AbsF(list.Begin()->GetNormalLeft().GetZ()) > 0.7f) {
+      sScrewRecoveryFloorContact = true;
+    }
   }
 #endif
 

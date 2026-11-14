@@ -18,6 +18,7 @@
 #include "port_photo.h"
 #include "port_pointer.h"
 #include "port_savestate.h"
+#include "port_screw_audio.h"
 #include "port_log.h"
 #include "port_memory_log.h"
 #include "port_disc.h"
@@ -647,6 +648,10 @@ bool CGameArchitectureSupport::LoadAudio() {
   }
   CSfxManager::LoadTranslationTable(gpSimplePool,
                                     gpResourceFactory->GetResourceIdByName("sound_lookup"));
+#ifdef TARGET_PC
+  // The Screw Attack's sounds from Echoes, when imported: above Prime's preloaded groups.
+  PortScrewAudio::Load();
+#endif
   x8c_pendingAudioGroups = rstl::vector< CToken >();
   x88_audioLoadStatus = kALS_Loaded;
   return true;
@@ -661,6 +666,9 @@ bool CMain::LoadAudio() {
 
 void CGameArchitectureSupport::UnloadAudio() {
   if (x88_audioLoadStatus == kALS_Loaded) {
+#ifdef TARGET_PC
+    PortScrewAudio::Unload();
+#endif
     for (uint i = 0; i < 5; ++i) {
       CAudioSys::SysPopGroupFromARAM();
       rstl::string name = CAudioSys::SysGetGroupSetName(

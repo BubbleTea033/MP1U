@@ -431,22 +431,34 @@
 - Screw Attack (experimental) (Controls > Options > Morph ball, persisted as `screw_attack`,
   off by default, off under Original experience): Metroid Prime 2's Screw Attack, a proof of
   concept of porting an Echoes mechanic. A third jump press in the air after a Space Jump, out
-  of water and while moving the way Samus faces, jumps and fast-morphs her into the ball. The
+  of water and while moving the way Samus faces, jumps and morphs her into the ball over Echoes' 0.75 s (a jump press during it ends the morph at once and is the attack's first press). The
   ball then falls by its own lighter gravity and can jump up to five more times: a press while
   falling within 4.5 units of the Space Jump's height jumps again (20 forward, and a vertical
   speed that brings every jump to the same peak), steered up to 3 degrees a jump by left and
   right. A press at any other time, falling past the limit, water, or touching anything ends
   it: a wall recoils the ball (12 away, 24 up, as Echoes' recovery does), a ceiling stops its
-  climb, and Samus fast-unmorphs as soon as she has room, tried for 1.5 s in the air (she stays a
-  ball where she cannot stand once landed). Bombs can't be laid during it. As in Echoes, the ball camera holds its height
+  climb. Then comes Echoes' recovery, with no control: Samus falls, the ball loses 5% of its
+  ground speed a tick once landed, and the recovery ends 0.25 s after she lands (1.067 s after a
+  fall faster than 50 units a second; 0.3 s when the attack itself met the floor), or after
+  0.4 s of contact, the ground counting at half rate, or 10 s with none. She then unmorphs over
+  Echoes' 0.75 s out of the ball, whatever the Fast Morph setting: the camera flies back to her
+  visor and, as in any morph transition, she can walk forward but not turn or jump; full control
+  returns in first person. Where she has no room to stand (beside a wall) she is moved the
+  shortest way to where she has, as Echoes does; failing that for 1.5 s (a tunnel) she stays a
+  ball. Bombs, Spring Ball and the morph button do nothing until the unmorph starts. With Echoes' animations imported (the Echoes suits
+  import, or `--import-echoes-screw <Echoes image>`), Samus's own model stands in for the ball
+  from the wind-up to the unmorph: she curls up, spins, uncurls (or bounces back off a wall,
+  facing it), falls and lands, and walks, jogs or runs if moved forward during the unmorph (Echoes' locomotion clips, chosen by her speed as Echoes chooses them), fading out over the second half as Echoes does; the lockout is the same without them. As in Echoes, the ball camera holds its height
   instead of following the jumps: 5 units over the Space Jump's height (lower where a wall ahead
   or a ceiling is in the way), reached at up to 8 units a second, and looks 2 units below its
   own height, so the view keeps one pitch while the ball jumps in it. The ball damages what
   its 2-unit radius touches (36 a second) (Boost Ball damage type). Needs the Space Jump Boots and the Morph
   Ball. The rules are Echoes' `CMorphBall::ComputeScrewAttackMovement` and the numbers its tweak
   on the USA disc (gravity 40, jumps 20/20, drop limit 4.5, steering 3 degrees, damage 36),
-  compiled in for this experiment. Not ported: the wall jump, the wall recoil, Samus's spin animation, the
-  effects and sounds. Its state is not in save states.
+  compiled in for this experiment. The same import brings Echoes' sounds (the wind-up, the spin
+  loops, the wall hit, coming out of the spin) and particle effects (the spin's three and the
+  flash on each jump), read from the player's Echoes disc into the user folder; F1 shows whether
+  each part loaded. Not ported: the wall jump. Its state is not in save states.
 - Toggle Spider Ball (Controls > Options > Morph ball and pause Options > Controller,
   persisted as `spider_toggle`, off by default, issue #243): an R press that attaches
   the spider ball to a track latches it held and the next press lets go. Away from a

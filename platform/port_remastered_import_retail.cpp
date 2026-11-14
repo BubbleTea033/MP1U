@@ -65,7 +65,8 @@ bool Retail::Index(std::string& error) {
       ++m_resourceCounts[Key(res.type, res.id)];
       // The skeletons too (the Dread Samus import's), the fonts (the HUD's text sizes) and the decals,
       // kept out of the fingerprint as the weapons are.
-      if (res.type == kWPSC || res.type == kCINF || res.type == kFONT || res.type == kDPSC) {
+      if (res.type == kWPSC || res.type == kCINF || res.type == kFONT || res.type == kDPSC ||
+          res.type == 0x41475343 /* AGSC */ || res.type == 0x50415254 /* PART */ || res.type == 0x4154424C /* ATBL */) {
         m_wpsc.emplace(Key(res.type, res.id), Where{entry, res.offset, res.size, res.compressed != 0});
       }
       if (res.type == kCMDL || res.type == kCSKR || res.type == kANCS || res.type == kTXTR || res.type == kMLVL ||

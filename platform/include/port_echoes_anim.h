@@ -441,7 +441,21 @@ inline constexpr const char* kInto = "B_into_screw_loop_samus";
 inline constexpr const char* kLoop = "B_screw_loop";
 inline constexpr const char* kOut = "B_outof_screw_loop_samus";
 inline constexpr const char* kWallBump = "B_outof_screw_loop_wallbump_samus";
-inline constexpr const char* kLand = "B_screw_land_samus";
+// The landings, as Echoes' single-player state machine and selection tables give them
+// (--inspect-echoes-anims): after a fall its jump landing, or the heavy one after a long fall;
+// when the attack itself meets the floor, its moving unmorph. B_screw_land_samus is in the set
+// but single player never selects it.
+inline constexpr const char* kLand = "B_jumpland_fromready_samus";
+inline constexpr const char* kHardLand = "B_HIGH_jumpland_samus";
+inline constexpr const char* kFloor = "B_ballforwardtorun_samus";
+// The fall between the exit and the landing: Echoes' jump loop (its PAS Jump state, variant 0,
+// loop), which TransitionOutOfScrewAttack loops once the exit clip is over.
+inline constexpr const char* kFall = "B_jumploop_fromready_samus";
+// Moving forward through the unmorph after the recovery: Echoes is back in its Locomotion state,
+// whose forward clips (PAS state 0, mode 1: 1 slow, 2 medium, 3 fast) are these.
+inline constexpr const char* kWalk = "B_walk_samus";
+inline constexpr const char* kJog = "B_jog_samus";
+inline constexpr const char* kRun = "B_run_samus";
 
 struct File {
   Vec3 centre;

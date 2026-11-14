@@ -5,6 +5,7 @@
 #ifdef TARGET_PC
 #include <cstdlib>
 #include "aurora/vfx.hpp"
+#include "port_custom_res.h"
 #include "port_log.h"
 #include "port_vfx_read.h"
 #include "Kyoto/Particles/CPortParticleParseScope.hpp"
@@ -23,6 +24,7 @@
 #include "Kyoto/Particles/CPortCurlNoise.hpp"
 #endif
 #include "Kyoto/Particles/CParticleGen.hpp"
+#include "Kyoto/Particles/CPortEchoesKeyframe.hpp"
 #include "Kyoto/Particles/CPortKeyframeInput.hpp"
 #include "Kyoto/Particles/CPortParticleVars.hpp"
 #include "Kyoto/Particles/CPortSystemTween.hpp"
@@ -54,6 +56,9 @@ CElementAllocationChunk* IElement::CElementAllocator::sFreeChunk = nullptr;
 static bool sPortCodeEmitter = false;
 // Set by a PEMV vector (CGenDescription::xPortPemv), collected per description in GetGPSM.
 static u8 sPortPemv = 0;
+// An Echoes effect is being read (the Screw Attack's, served from PortCustomRes' provided ids):
+// keys Remastered reuses with another layout read Echoes' instead.
+static bool sPortEchoes = false;
 // A PITP mode word with this bit is an ITPE the effect left out (Remastered's default 1);
 // MP_ITPE_DEFAULT=0 drops those, to compare.
 static const u32 kPortSpreadDefault = 0x100;
@@ -435,11 +440,14 @@ CGenDescription* CParticleDataFactory::CreateGeneratorDescription(CInputStream& 
   CPortKeepGlobals::sCollect = &desc->xPortKeeps;
   const u8 outerPemv = sPortPemv;
   sPortPemv = 0;
+  const bool outerEchoes = sPortEchoes;
+  sPortEchoes = id >= PortCustomRes::kProvidedBase && id < PortCustomRes::kProvidedEnd;
 #endif
   CreateGPSM(desc, in, assets, pool);
 #ifdef TARGET_PC
   CPortKeepGlobals::sCollect = outerKeeps;
   desc->xPortPemv = sPortPemv;
+  sPortEchoes = outerEchoes;
   sPortPemv = outerPemv;
 #endif
   LoadGPSMTokens(desc);
@@ -662,6 +670,17 @@ bool CParticleDataFactory::CreateGPSM(CGenDescription* desc, CInputStream& in,
     case SBIG('CIND'):
       desc->x32_24_CIND = GetBool(in);
       break;
+#ifdef TARGET_PC
+    case SBIG('XTAD'):
+      // Echoes' extra-time int element (CGenDescription::mXTAD); read past, not used.
+      delete GetIntElement(in);
+      break;
+    case SBIG('INDM'):
+      // Echoes' indirect texture flag (CGenDescription::mINDM); read so the rest parses, not
+      // drawn: Prime's renderer has no use for it.
+      GetBool(in);
+      break;
+#endif
     case SBIG('PMDL'): {
       rstl::optional_object< TToken< CModel > > model(GetModel(in, pool));
       if (model) {
@@ -1093,6 +1112,11 @@ bool CParticleDataFactory::CreateGPSM(CGenDescription* desc, CInputStream& in,
       desc->xPortBakedLighting = in.ReadLong() != 0;
       break;
     case SBIG('VMPC'):
+      if (sPortEchoes) {
+        // Echoes: a bool element ('CNST' and one byte), not Remastered's word.
+        desc->xPortVelocityAtCreation = GetBool(in);
+        break;
+      }
       GetClassID(in);
       desc->xPortVelocityAtCreation = in.ReadLong() != 0;
       break;
@@ -1361,6 +1385,10 @@ bool CParticleDataFactory::CreateGPSM(CGenDescription* desc, CInputStream& in,
       done = true;
       break;
     default:
+#ifdef TARGET_PC
+      // The rest of the effect goes unread; say which key stopped it (a format from another game).
+      PortLog::Write("particles: unknown key %08X, the rest of the effect is skipped\n", u32(clsId));
+#endif
       return false;
     }
   }
@@ -1403,6 +1431,20 @@ CIntElement* CParticleDataFactory::GetIntElement(CInputStream& in) {
   case SBIG('KEYP'): {
     return rs_new CIEKeyframeEmitter(in);
   }
+#ifdef TARGET_PC
+  case SBIG('KEYF'): {
+    // Echoes' keyframe input (CPortEchoesKeyframe.hpp): the keys, then the input element.
+    PortEchoesKeyframe::CKeyframeInput< CIntElement, int >* keyf =
+        rs_new PortEchoesKeyframe::CKeyframeInput< CIntElement, int >(in);
+    keyf->SetInput(GetRealElement(in));
+    return keyf;
+  }
+  case SBIG('ISWT'): {
+    CIntElement* a = GetIntElement(in);
+    CIntElement* b = GetIntElement(in);
+    return rs_new PortEchoesKeyframe::CInitialSwitch< CIntElement, int >(a, b);
+  }
+#endif
   case SBIG('TSCL'): {
     return rs_new CIETimescale(GetRealElement(in));
   }
@@ -1530,6 +1572,24 @@ CIntElement* CParticleDataFactory::GetIntElement(CInputStream& in) {
   return nullptr;
 }
 
+#ifdef TARGET_PC
+namespace {
+// Port-only real GTCP: Echoes' CREGetCumulativeParticleCount, Prime's int GTCP as a float (an
+// Echoes KEYF reads its keys at it).
+class CREPortCumulativeParticleCount : public CRealElement {
+  CIEGetCumulativeParticleCount x4_count;
+
+public:
+  bool GetValue(int frame, float& valOut) const override {
+    int count = 0;
+    x4_count.GetValue(frame, count);
+    valOut = static_cast< float >(count);
+    return false;
+  }
+};
+} // namespace
+#endif
+
 CRealElement* CParticleDataFactory::GetRealElement(CInputStream& in) {
   FourCC clsId = GetClassID(in);
   switch (clsId) {
@@ -1537,6 +1597,8 @@ CRealElement* CParticleDataFactory::GetRealElement(CInputStream& in) {
   // Port-only VARF: a Remastered particle variable of the system being evaluated (PVRT index).
   case SBIG('VARF'):
     return rs_new CREPortVar(in.ReadLong());
+  case SBIG('GTCP'):
+    return rs_new CREPortCumulativeParticleCount();
   // Port-only PSDT: the system's shutdown countdown fraction left (SDTR).
   case SBIG('PSDT'):
     return rs_new CREPortShutdownRemaining();
@@ -1638,6 +1700,15 @@ CRealElement* CParticleDataFactory::GetRealElement(CInputStream& in) {
   case SBIG('KEYP'): {
     return rs_new CREKeyframeEmitter(in);
   }
+#ifdef TARGET_PC
+  case SBIG('KEYF'): {
+    // Echoes' keyframe input (CPortEchoesKeyframe.hpp): the keys, then the input element.
+    PortEchoesKeyframe::CKeyframeInput< CRealElement, float >* keyf =
+        rs_new PortEchoesKeyframe::CKeyframeInput< CRealElement, float >(in);
+    keyf->SetInput(GetRealElement(in));
+    return keyf;
+  }
+#endif
   case SBIG('SCAL'): {
     return rs_new CRETimeScale(GetRealElement(in));
   }
@@ -2160,6 +2231,28 @@ CVectorElement* CParticleDataFactory::GetVectorElement(CInputStream& in) {
   case SBIG('KEYP'):
     ret = rs_new CVEKeyframeEmitter(in);
     break;
+#ifdef TARGET_PC
+  case SBIG('KEYF'): {
+    // Echoes' keyframe input (CPortEchoesKeyframe.hpp): the keys, then the input element.
+    PortEchoesKeyframe::CKeyframeInput< CVectorElement, CVector3f >* keyf =
+        rs_new PortEchoesKeyframe::CKeyframeInput< CVectorElement, CVector3f >(in);
+    keyf->SetInput(GetRealElement(in));
+    ret = keyf;
+    break;
+  }
+  case SBIG('ISWT'): {
+    CVectorElement* a = GetVectorElement(in);
+    CVectorElement* b = GetVectorElement(in);
+    ret = rs_new PortEchoesKeyframe::CInitialSwitch< CVectorElement, CVector3f >(a, b);
+    break;
+  }
+  case SBIG('PAP1'):
+    ret = rs_new PortEchoesKeyframe::CVEAccessParameters< 0 >();
+    break;
+  case SBIG('PAP2'):
+    ret = rs_new PortEchoesKeyframe::CVEAccessParameters< 3 >();
+    break;
+#endif
   case SBIG('ANGC'): {
     CRealElement* angleXBias = GetRealElement(in);
     CRealElement* angleYBias = GetRealElement(in);
@@ -2635,6 +2728,22 @@ CColorElement* CParticleDataFactory::GetColorElement(CInputStream& in) {
   case SBIG('KEYP'):
     ret = rs_new CCEKeyframeEmitter(in);
     break;
+#ifdef TARGET_PC
+  case SBIG('KEYF'): {
+    // Echoes' keyframe input (CPortEchoesKeyframe.hpp): the keys, then the input element.
+    PortEchoesKeyframe::CKeyframeInput< CColorElement, CColor >* keyf =
+        rs_new PortEchoesKeyframe::CKeyframeInput< CColorElement, CColor >(in);
+    keyf->SetInput(GetRealElement(in));
+    ret = keyf;
+    break;
+  }
+  case SBIG('ISWT'): {
+    CColorElement* a = GetColorElement(in);
+    CColorElement* b = GetColorElement(in);
+    ret = rs_new PortEchoesKeyframe::CInitialSwitch< CColorElement, CColor >(a, b);
+    break;
+  }
+#endif
 #ifdef TARGET_PC
   case SBIG('PGRD'):
     ret = rs_new CCEGradient(in);
